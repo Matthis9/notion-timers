@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Timer</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Inter', sans-serif;
+  }
+
+  .circle {
+    width: 300px;
+    height: 300px;
+    border-radius: 50%;
+    border: 2px solid #1a1a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    transition: border-color 0.3s;
+  }
+  .circle.done { border-color: #e63946; animation: borderPulse 1.2s ease-in-out infinite; }
+
+  @keyframes borderPulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(230,57,70,0); }
+    50%      { box-shadow: 0 0 0 6px rgba(230,57,70,0.15); }
+  }
+
+  .time-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .time-display {
+    font-size: 40px;
+    font-weight: 300;
+    letter-spacing: -1px;
+    color: #1a1a1a;
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.3s, opacity 0.2s;
+    line-height: 1;
+  }
+  .time-display:hover { opacity: 0.5; }
+  .time-display.done  { color: #e63946; }
+
+  .time-input {
+    font-size: 40px;
+    font-weight: 300;
+    letter-spacing: -1px;
+    color: #1a1a1a;
+    border: none;
+    outline: none;
+    background: transparent;
+    text-align: center;
+    width: 220px;
+    display: none;
+    line-height: 1;
+    font-family: 'Inter', sans-serif;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.15s, transform 0.1s;
+    color: #1a1a1a;
+  }
+  .btn:hover  { opacity: 0.5; }
+  .btn:active { transform: scale(0.92); }
+  .btn svg { display: block; }
+</style>
+</head>
+<body>
+
+<div class="circle" id="circle">
+  <div class="time-wrap">
+    <span class="time-display" id="timeDisplay" onclick="startEdit()">00:25:00</span>
+    <input class="time-input" id="timeInput" type="text"
+           placeholder="hh:mm:ss"
+           onblur="commitEdit()"
+           onkeydown="handleInputKey(event)" />
+  </div>
+
+  <div class="controls">
+    <button class="btn" onclick="toggleTimer()" title="Start / Pause">
+      <svg id="iconPlay" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="5 3 19 12 5 21 5 3"/>
+      </svg>
+      <svg id="iconPause" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+        <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
+      </svg>
+    </button>
+
+    <button class="btn" onclick="resetTimer()" title="Reset">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="4" width="16" height="16" rx="2"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script>
+  const STORAGE_KEY = 'notion_timer_v3_' + location.hostname + location.pathname;
+
+  let totalSeconds = 0;
+  let remaining    = 0;
+  let interval     = null;
+  let running      = false;
+  let durationSec  = 25 * 60;
+
+  // Timestamp-based tracking — immune to tab throttling
+  let startedAt   = null; // Date.now() when timer last resumed
+  let startedFrom = 0;    // remaining seconds at that moment
+
+  // ── Audio ────────────────────────────────────────────────
+  let audioCtx = null, alarmInterval = null;
+
+  function getCtx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+
+  function playBeep() {
+    try {
+      const ctx = getCtx();
+      [[880,0,0.10],[880,0.15,0.10],[1320,0.30,0.22]].forEach(([freq,start,dur]) => {
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+        gain.gain.setValueAtTime(0, ctx.currentTime + start);
+        gain.gain.linearRampToValueAtTime(0.4, ctx.currentTime + start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + dur + 0.05);
+      });
+    } catch(e) {}
+  }
+
+  function startAlarm() { stopAlarm(); playBeep(); alarmInterval = setInterval(playBeep, 1800); }
+  function stopAlarm()  { if (alarmInterval) { clearInterval(alarmInterval); alarmInterval = null; } }
+
+  // ── Format / Parse ───────────────────────────────────────
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  function formatTime(s) {
+    const h   = Math.floor(s / 3600);
+    const m   = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    return pad(h) + ':' + pad(m) + ':' + pad(sec);
+  }
+
+  function parseInput(str) {
+    str = str.trim().replace(/[^0-9:]/g, '');
+    const parts = str.split(':');
+    if (parts.length === 3) return (parseInt(parts[0])||0)*3600 + (parseInt(parts[1])||0)*60 + (parseInt(parts[2])||0);
+    if (parts.length === 2) return (parseInt(parts[0])||0)*3600 + (parseInt(parts[1])||0)*60;
+    return (parseInt(str)||0) * 60;
+  }
+
+  function loadSaved() {
+    const s = localStorage.getItem(STORAGE_KEY);
+    if (s) durationSec = parseInt(s) || 25*60;
+  }
+  function saveDur() { localStorage.setItem(STORAGE_KEY, durationSec); }
+
+  // ── Display ──────────────────────────────────────────────
+  function setDisplay(sec, state) {
+    const el = document.getElementById('timeDisplay');
+    el.textContent = formatTime(sec);
+    el.className = 'time-display' + (state === 'done' ? ' done' : '');
+    document.getElementById('circle').className = 'circle' + (state === 'done' ? ' done' : '');
+  }
+
+  function setIcons(isRunning) {
+    document.getElementById('iconPlay').style.display  = isRunning ? 'none'  : 'block';
+    document.getElementById('iconPause').style.display = isRunning ? 'block' : 'none';
+  }
+
+  // ── Edit ─────────────────────────────────────────────────
+  function startEdit() {
+    if (running) return;
+    stopAlarm();
+    document.getElementById('timeDisplay').style.display = 'none';
+    const input = document.getElementById('timeInput');
+    input.style.display = 'block';
+    input.value = formatTime(remaining > 0 ? remaining : durationSec);
+    input.select();
+    input.focus();
+  }
+
+  function commitEdit() {
+    const input = document.getElementById('timeInput');
+    const secs  = parseInput(input.value);
+    if (secs > 0) { durationSec = Math.min(secs, 99*3600+59*60+59); saveDur(); }
+    input.style.display = 'none';
+    document.getElementById('timeDisplay').style.display = 'block';
+    resetTimer(true);
+  }
+
+  function handleInputKey(e) {
+    if (e.key === 'Enter')  { e.preventDefault(); commitEdit(); }
+    if (e.key === 'Escape') {
+      document.getElementById('timeInput').style.display   = 'none';
+      document.getElementById('timeDisplay').style.display = 'block';
+    }
+  }
+
+  // ── Timer ────────────────────────────────────────────────
+  function tick() {
+    // Calculate true remaining from wall-clock time
+    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+    const current = Math.max(0, startedFrom - elapsed);
+
+    if (current > 0) {
+      remaining = current;
+      setDisplay(remaining, 'running');
+    } else {
+      remaining = 0;
+      clearInterval(interval);
+      running = false;
+      setIcons(false);
+      setDisplay(0, 'done');
+      startAlarm();
+    }
+  }
+
+  function toggleTimer() {
+    stopAlarm();
+    if (!running && remaining === 0 && totalSeconds > 0) { resetTimer(); return; }
+
+    if (!running) {
+      if (remaining === 0 || totalSeconds === 0) {
+        totalSeconds = durationSec;
+        remaining    = totalSeconds;
+      }
+      // Record wall-clock start
+      startedAt   = Date.now();
+      startedFrom = remaining;
+      running     = true;
+      interval    = setInterval(tick, 500); // poll every 500ms for responsiveness
+      setIcons(true);
+      setDisplay(remaining, 'running');
+    } else {
+      clearInterval(interval);
+      // Snapshot true remaining before pausing
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      remaining = Math.max(0, startedFrom - elapsed);
+      running   = false;
+      setIcons(false);
+      setDisplay(remaining, '');
+    }
+  }
+
+  function resetTimer(silent) {
+    if (!silent) stopAlarm();
+    clearInterval(interval);
+    running = false; totalSeconds = 0; remaining = 0;
+    startedAt = null; startedFrom = 0;
+    setIcons(false);
+    setDisplay(durationSec, '');
+  }
+
+  // ── Init ─────────────────────────────────────────────────
+  loadSaved();
+  setDisplay(durationSec, '');
+</script>
+</body>
+</html>
